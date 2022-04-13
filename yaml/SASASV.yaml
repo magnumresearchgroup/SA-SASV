@@ -1,0 +1,189 @@
+
+seed: 1986
+__set_seed: !!python/object/apply:torch.manual_seed [!ref <seed>]
+
+data_folder: ./processed_sasv_data
+output_folder: !ref ./sasv_results/SASASV/<seed>
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+train_annotation: !ref <data_folder>/merge_train.json
+dev_annotation: !ref <data_folder>/merge_dev.json
+eval_annotation: !ref <data_folder>/merge_dev.json
+
+
+#########-----------------Data------------------------##########
+#########-----------------End-----------------------##########
+
+
+# The train logger writes training statistics to a file, as well as stdout.
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+  save_file: !ref <train_log>
+
+loss_metric: !name:loss.SASASV_loss.SASASV_loss
+asv_loss_metric: !new:speechbrain.nnet.losses.LogSoftmaxWrapper
+  loss_fn: !new:speechbrain.nnet.losses.AdditiveAngularMargin
+    margin: 0.2
+    scale: 30
+triplet_loss_metric: !new:loss.TripletLoss.HardTripletLoss
+  margin: 0.1
+  hardest: False
+
+ckpt_interval_minutes: 20 # save checkpoint every N min
+
+# Feature parameters
+n_mels: 80
+dim_neck_fbanks: 128
+emb_dim: 256
+
+# Training Parameters
+sample_rate: 16000
+sentence_len: 3.0
+number_of_epochs: 100
+batch_size: 8
+lr_start: 0.0001
+
+
+dataloader_options:
+  batch_size: !ref <batch_size>
+  shuffle: False
+  drop_last: True
+
+
+
+
+#########-----------------Modules---------------------##########
+#########-----------------Start-----------------------##########
+
+# Added noise and  reverberation come from OpenRIR dataset, automatically
+# downloaded and prepared with this Environmental Corruption class.
+env_corrupt: !new:speechbrain.lobes.augment.EnvCorrupt
+  openrir_folder: !ref <data_folder>
+  babble_prob: 0.0
+  reverb_prob: 0.0
+  noise_prob: 1.0
+  noise_snr_low: 0
+  noise_snr_high: 15
+
+augmentation: !new:speechbrain.lobes.augment.TimeDomainSpecAugment
+  sample_rate: !ref <sample_rate>
+  speeds: [95, 100, 105]
+
+
+
+# ------ Option ends --------
+
+# Mean and std normalization of the input features
+mean_var_norm: !new:speechbrain.processing.features.InputNormalization
+  norm_type: sentence
+  std_norm: False
+
+raw_encoder: !new:models.SA_SASV.RawEncoder
+  activation: !name:torch.nn.LeakyReLU
+
+mfcc: !new:datasets.MFCC.MFCC
+  n_mels: !ref <n_mels>
+  sample_rate: 16000
+  f_max: 8000
+  hop_length: 10
+
+fbanks_encoder: !new:models.ECAPA_TDNN.ECAPA_TDNN
+  input_size:  !ref <n_mels>
+  channels: [1024, 1024, 1024, 1024, 3072]
+  kernel_sizes: [5, 3, 3, 3, 1]
+  dilations: [1, 2, 3, 4, 1]
+  attention_channels: 128
+  lin_neurons:  !ref <emb_dim>
+
+classifier_asv: !new:models.SA_SASV.ASV_Decoder
+  input_size:   !ref <emb_dim>
+  lin_blocks: 0
+  lin_neurons: 512
+  out_neurons: 40
+
+classifier_cm: !new:models.SA_SASV.CM_Decoder
+  input_shape: [null, null, !ref <emb_dim>]
+  activation: !name:torch.nn.LeakyReLU
+  lin_blocks: 1
+  lin_neurons: 512
+
+discriminator_tts: !new:models.SA_SASV.TTS_Discriminator
+  input_size:   !ref <emb_dim>
+  lin_blocks: 1
+  lin_neurons: 512
+  out_neurons: 4
+
+discriminator_vc: !new:models.SA_SASV.VC_Discriminator
+  input_size:   !ref <emb_dim>
+  lin_blocks: 1
+  lin_neurons: 512
+  out_neurons: 2
+
+batch_norm: !new:models.ECAPA_TDNN.BatchNorm1d
+  input_size:  6656
+
+conv_1d: !new:models.ECAPA_TDNN.Conv1d
+  in_channels: 6656
+  out_channels: !ref <emb_dim>
+  kernel_size: 1
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+  limit: !ref <number_of_epochs>
+
+lr_scheduler: !new:speechbrain.nnet.schedulers.ReduceLROnPlateau
+  factor: 0.8
+  patience: 2
+  dont_halve_until_epoch: 5
+
+modules:
+  fbanks_encoder: !ref <fbanks_encoder>
+  env_corrupt: !ref <env_corrupt>
+  augmentation: !ref <augmentation>
+  classifier_asv: !ref <classifier_asv>
+  classifier_cm: !ref <classifier_cm>
+  mean_var_norm: !ref <mean_var_norm>
+  discriminator_tts: !ref <discriminator_tts>
+  discriminator_vc: !ref <discriminator_vc>
+  asv_loss_metric: !ref <asv_loss_metric>
+  triplet_loss_metric: !ref <triplet_loss_metric>
+  batch_norm: !ref <batch_norm>
+  raw_encoder: !ref <raw_encoder>
+  conv_1d: !ref <conv_1d>
+  mfcc: !ref <mfcc>
+
+
+
+label_encoder: !new:speechbrain.dataio.encoder.CategoricalEncoder
+  #########-----------------Modules---------------------##########
+  #########-----------------End-----------------------##########
+
+
+  #########-----------------Trainer---------------------##########
+  #########-----------------Start-----------------------##########
+
+
+  # This optimizer will be constructed by the Brain class after all parameters
+# are moved to the correct device. Then it will be added to the checkpointer.
+opt_class: !name:torch.optim.Adam
+  lr: !ref <lr_start>
+
+
+
+
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+  checkpoints_dir: !ref <save_folder>
+  recoverables:
+    fbanks_encoder: !ref <fbanks_encoder>
+    classifier_asv: !ref <classifier_asv>
+    classifier_cm: !ref <classifier_cm>
+    normalizer: !ref <mean_var_norm>
+    counter: !ref <epoch_counter>
+    discriminator_tts: !ref <discriminator_tts>
+    discriminator_vc: !ref <discriminator_vc>
+    batch_norm: !ref <batch_norm>
+    raw_encoder: !ref <raw_encoder>
+    conv_1d: !ref <conv_1d>
+
+
+
